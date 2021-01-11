@@ -2,7 +2,9 @@ package rabbitmqvndelay_test
 
 import (
 	"fmt"
-	"log"
+	"os"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,61 +14,33 @@ import (
 )
 
 const queueName = "vn.unit-test"
-const dataForPublish = "just use for unit test"
+const acceptableDelay int64 = 5
+
+var connection *amqp.Connection
+
+func TestMain(m *testing.M) {
+	var err error
+	url := fmt.Sprintf("amqp://guest:guest@localhost:5672/")
+	connection, err = amqp.Dial(url)
+	if err != nil {
+		os.Exit(-1)
+	}
+
+	os.Exit(m.Run())
+}
 
 func TestRabbitMQWithDelay(t *testing.T) {
-	publisher := setupTest(t)
+	publisher, err := r.NewRabbitMQVNDelay(connection)
 
-	t.Run("Expect result published with delay correct", func(t *testing.T) {
-		err := publisher.PublishWithDelay(queueName, dataForPublish, time.Second*1)
-		if err != nil {
-			t.Error("error on publish process", err)
-		}
-		time.Sleep(2 * time.Second)
-
-		queueResult := getPublishedData()
-		if queueResult == "" {
-			t.Error("Failed to get published data")
-		} else if queueResult != dataForPublish {
-			t.Error("missmatch data for publish")
-		}
-	})
-
-	t.Run("Expect result published with delay error because time less than zero", func(t *testing.T) {
-		err := publisher.PublishWithDelay(queueName, dataForPublish, -1)
-		if err == nil {
-			t.Error("error on publish process", err)
-		}
-	})
-}
-
-func setupTest(t *testing.T) *r.RabbitMQVnDelay {
-	url := fmt.Sprintf("amqp://guest:guest@localhost:5672/")
-	connection, err := amqp.Dial(url)
 	if err != nil {
-		t.Error("error dial", err)
-	}
-
-	publisher, err := r.NewRabbitMQ(connection)
-	if err != nil {
-		t.Error("error new instance", err)
-	}
-
-	return publisher
-}
-
-func getPublishedData() string {
-	var body string
-
-	url := fmt.Sprintf("amqp://guest:guest@localhost:5672/")
-	connection, err := amqp.Dial(url)
-	if err != nil {
-		return ""
+		t.Error("Failed to connect with rabbitmq")
+		t.FailNow()
 	}
 
 	ch, err := connection.Channel()
 	if err != nil {
-		return ""
+		t.Error("failed to create channel. Error: ", err)
+		t.FailNow()
 	}
 
 	messages, err := ch.Consume(
@@ -79,17 +53,51 @@ func getPublishedData() string {
 		nil,
 	)
 
-	finish := make(chan bool)
+	var waitgroup sync.WaitGroup
+
 	go func() {
 		for d := range messages {
-			body = string(d.Body)
-			log.Printf("Received a message: %s", d.Body)
-			log.Printf("Done")
+			receivedTime := time.Now().Unix()
+			messageInString := string(d.Body)
+			messageInNumber, err := strconv.ParseInt(messageInString, 10, 64)
+			if err != nil {
+				t.Error("Failed on read message. Error: ", err)
+			}
+
+			delta := receivedTime - messageInNumber
+
+			if delta > acceptableDelay {
+				t.Error("Message received not on proper delay. Expect at: ", messageInNumber, " but received at: ", receivedTime)
+			}
+
 			d.Ack(false)
-			finish <- true
+			waitgroup.Done()
 		}
 	}()
 
-	<-finish
-	return body
+	waitgroup.Add(1)
+	t.Run("Expect result published with delay", func(t *testing.T) {
+		duration := time.Millisecond * 100
+		message := strconv.FormatInt(time.Now().Add(duration).Unix(), 10)
+
+		err = publisher.PublishWithDelay(queueName, message, duration)
+		if err != nil {
+			t.Error("Expect error is not nil on publish. Error: ", err)
+			waitgroup.Done()
+		}
+
+	})
+
+	waitgroup.Add(1)
+	t.Run("Expect result published without delay", func(t *testing.T) {
+		message := strconv.FormatInt(time.Now().Unix(), 10)
+
+		err = publisher.Publish(queueName, message)
+		if err != nil {
+			t.Error("Expect error is not nil on publish. Error: ", err)
+			waitgroup.Done()
+		}
+	})
+
+	waitgroup.Wait()
 }

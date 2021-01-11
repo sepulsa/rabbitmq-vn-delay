@@ -15,22 +15,26 @@ const delayExchange = "delay.vn.exchange"
 const suffixDelayQueue = "delay.vn.queue"
 
 var lock = &sync.Mutex{}
+var delayLock = &sync.Mutex{}
 
-type RabbitMQVnDelay struct {
-	channel  *amqp.Channel
-	mapQueue map[string]bool
+//RabbitMQVNDelay rabbitmq publish with delay supported
+type RabbitMQVNDelay struct {
+	channel       *amqp.Channel
+	mapQueue      map[string]bool
+	delayMapQueue map[string]bool
 }
 
-//NewRabbitMQ create new instance for rabbitMQ, used to call functional for Publish and PublishWithDelay
-func NewRabbitMQ(connection *amqp.Connection) (*RabbitMQVnDelay, error) {
+//NewRabbitMQVNDelay create new instance for RabbitMQVNDelay, used to call functional for Publish and PublishWithDelay
+func NewRabbitMQVNDelay(connection *amqp.Connection) (*RabbitMQVNDelay, error) {
 
 	channel, err := connection.Channel()
 	if err != nil {
 		return nil, err
 	}
 
-	r := &RabbitMQVnDelay{
+	r := &RabbitMQVNDelay{
 		channel,
+		map[string]bool{},
 		map[string]bool{},
 	}
 
@@ -48,21 +52,20 @@ func NewRabbitMQ(connection *amqp.Connection) (*RabbitMQVnDelay, error) {
 }
 
 //Publish used to send message to queue without delay
-func (r *RabbitMQVnDelay) Publish(queueName string, message string) error {
+func (r *RabbitMQVNDelay) Publish(queueName string, message string) error {
 	var (
-		err         error
-		qName       = queueName
-		routingName = queueName
+		err        error
+		routingKey = queueName
 	)
 
-	if _, value := r.mapQueue[qName]; !value {
-		err = r.initQueue(qName)
+	if _, value := r.mapQueue[queueName]; !value {
+		err = r.initQueue(queueName)
 		if err != nil {
 			return err
 		}
 	}
 
-	err = r.publishActiveMessage(message, routingName, activeExchange)
+	err = r.publishActiveMessage(message, routingKey, activeExchange)
 	if err != nil {
 		return err
 	}
@@ -71,21 +74,20 @@ func (r *RabbitMQVnDelay) Publish(queueName string, message string) error {
 }
 
 //PublishWithDelay used to send message to queue with given specific delay, will accept time.Duration parameters
-func (r *RabbitMQVnDelay) PublishWithDelay(queueName string, message string, delay time.Duration) error {
+func (r *RabbitMQVNDelay) PublishWithDelay(queueName string, message string, delay time.Duration) error {
 	var (
-		err         error
-		qName       = queueName
-		routingName = queueName + "." + suffixDelayQueue
+		err        error
+		routingKey = queueName + "." + suffixDelayQueue
 	)
 
-	if _, value := r.mapQueue[qName]; !value {
-		err = r.initQueue(qName)
+	if _, value := r.delayMapQueue[queueName]; !value {
+		err = r.initDelayQueue(queueName)
 		if err != nil {
 			return err
 		}
 	}
 
-	err = r.publishDelayMessage(message, routingName, delayExchange, delay)
+	err = r.publishDelayMessage(message, routingKey, delayExchange, delay)
 	if err != nil {
 		return err
 	}
@@ -93,40 +95,24 @@ func (r *RabbitMQVnDelay) PublishWithDelay(queueName string, message string, del
 	return nil
 }
 
-func (r *RabbitMQVnDelay) initQueue(queueName string) error {
+func (r *RabbitMQVNDelay) initQueue(queueName string) error {
 	var (
-		err         error
-		qName       = queueName
-		routingName = queueName
+		err        error
+		routingKey = queueName
 	)
 	lock.Lock()
 	defer lock.Unlock()
 
-	if _, value := r.mapQueue[qName]; value {
+	if _, value := r.mapQueue[queueName]; value {
 		return nil
 	}
 
-	err = r.declareActiveQueue(qName)
+	err = r.declareActiveQueue(queueName)
 	if err != nil {
 		return err
 	}
 
-	err = r.bindQueueWithExchange(qName, routingName, activeExchange)
-	if err != nil {
-		return err
-	}
-
-	var (
-		qNameDelay       = queueName + "." + suffixDelayQueue
-		routingNameDelay = queueName + "." + suffixDelayQueue
-	)
-
-	err = r.declareDelayedQueue(qNameDelay, queueName)
-	if err != nil {
-		return err
-	}
-
-	err = r.bindQueueWithExchange(qNameDelay, routingNameDelay, delayExchange)
+	err = r.bindQueueWithExchange(queueName, routingKey, activeExchange)
 	if err != nil {
 		return err
 	}
@@ -136,14 +122,44 @@ func (r *RabbitMQVnDelay) initQueue(queueName string) error {
 	return nil
 }
 
-func (r *RabbitMQVnDelay) publishActiveMessage(message string, routingName string, exchangeName string) error {
+func (r *RabbitMQVNDelay) initDelayQueue(queueName string) error {
+	var (
+		err             error
+		delayQueueName  = queueName + "." + suffixDelayQueue
+		delayroutingKey = queueName + "." + suffixDelayQueue
+	)
+	delayLock.Lock()
+	defer delayLock.Unlock()
+
+	if _, value := r.delayMapQueue[queueName]; value {
+		return nil
+	}
+
+	r.initQueue(queueName)
+
+	err = r.declareDelayedQueue(delayQueueName, queueName)
+	if err != nil {
+		return err
+	}
+
+	err = r.bindQueueWithExchange(delayQueueName, delayroutingKey, delayExchange)
+	if err != nil {
+		return err
+	}
+
+	r.delayMapQueue[queueName] = true
+
+	return nil
+}
+
+func (r *RabbitMQVNDelay) publishActiveMessage(message string, routingKey string, exchangeName string) error {
 	err := r.channel.Publish(
 		exchangeName,
-		routingName,
+		routingKey,
 		false,
 		false,
 		amqp.Publishing{
-			ContentType: "application/json",
+			ContentType: "text/plain",
 			Body:        []byte(message),
 		})
 	if err != nil {
@@ -153,7 +169,7 @@ func (r *RabbitMQVnDelay) publishActiveMessage(message string, routingName strin
 	return nil
 }
 
-func (r *RabbitMQVnDelay) publishDelayMessage(message string, routingName string, exchangeName string, delay time.Duration) error {
+func (r *RabbitMQVNDelay) publishDelayMessage(message string, routingKey string, exchangeName string, delay time.Duration) error {
 	if delay < 0 {
 		return fmt.Errorf("wrong delay value")
 	}
@@ -161,12 +177,12 @@ func (r *RabbitMQVnDelay) publishDelayMessage(message string, routingName string
 	delayTime := strconv.FormatInt(delay.Milliseconds(), 10)
 	err := r.channel.Publish(
 		exchangeName,
-		routingName,
+		routingKey,
 		false,
 		false,
 		amqp.Publishing{
 			Expiration:  delayTime,
-			ContentType: "application/json",
+			ContentType: "text/plain",
 			Body:        []byte(message),
 		})
 	if err != nil {
@@ -176,7 +192,7 @@ func (r *RabbitMQVnDelay) publishDelayMessage(message string, routingName string
 	return nil
 }
 
-func (r *RabbitMQVnDelay) declareExchange(exchangeName string) error {
+func (r *RabbitMQVNDelay) declareExchange(exchangeName string) error {
 	var err error
 
 	if err = r.channel.ExchangeDeclare(
@@ -194,7 +210,7 @@ func (r *RabbitMQVnDelay) declareExchange(exchangeName string) error {
 	return nil
 }
 
-func (r *RabbitMQVnDelay) declareActiveQueue(queueName string) error {
+func (r *RabbitMQVNDelay) declareActiveQueue(queueName string) error {
 	var err error
 
 	_, err = r.channel.QueueDeclare(
@@ -212,14 +228,14 @@ func (r *RabbitMQVnDelay) declareActiveQueue(queueName string) error {
 	return nil
 }
 
-func (r *RabbitMQVnDelay) declareDelayedQueue(queueName string, routingName string) error {
+func (r *RabbitMQVNDelay) declareDelayedQueue(queueName string, routingKey string) error {
 	var (
 		err error
 	)
 
 	argsDelay1 := amqp.Table{
 		"x-dead-letter-exchange":    activeExchange,
-		"x-dead-letter-routing-key": routingName,
+		"x-dead-letter-routing-key": routingKey,
 	}
 
 	_, err = r.channel.QueueDeclare(
@@ -237,12 +253,12 @@ func (r *RabbitMQVnDelay) declareDelayedQueue(queueName string, routingName stri
 	return nil
 }
 
-func (r *RabbitMQVnDelay) bindQueueWithExchange(queueName string, routingName string, exchangeName string) error {
+func (r *RabbitMQVNDelay) bindQueueWithExchange(queueName string, routingKey string, exchangeName string) error {
 	var err error
 
 	if err = r.channel.QueueBind(
 		queueName,
-		routingName,
+		routingKey,
 		exchangeName,
 		false,
 		nil,
