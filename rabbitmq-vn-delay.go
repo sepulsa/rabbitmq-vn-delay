@@ -94,9 +94,10 @@ func (r *RabbitMQVNDelay) closeChannelHandler() {
 					continue
 				}
 
-				r.channel, err = r.connection.Channel()
+				channel, err := r.connection.Channel()
 
 				if err == nil {
+					r.channel = channel
 					log.Println(logTag, "success to re-create channel")
 					break
 				}
@@ -226,10 +227,6 @@ func (r *RabbitMQVNDelay) initDelayQueue(queueName string) error {
 }
 
 func (r *RabbitMQVNDelay) publishActiveMessage(message string, routingKey string, exchangeName string) error {
-	if r.channel == nil {
-		return errors.New("Channel was closed")
-	}
-
 	err := r.channel.Publish(
 		exchangeName,
 		routingKey,
@@ -253,10 +250,6 @@ func (r *RabbitMQVNDelay) publishDelayMessage(message string, routingKey string,
 	}
 
 	delayTime := strconv.FormatInt(delay.Milliseconds(), 10)
-
-	if r.channel == nil {
-		return errors.New("Channel was closed")
-	}
 
 	err := r.channel.Publish(
 		exchangeName,
