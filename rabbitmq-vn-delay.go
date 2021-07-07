@@ -1,7 +1,6 @@
 package rabbitmqvndelay
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -23,96 +22,62 @@ const (
 var lock = &sync.Mutex{}
 var delayLock = &sync.Mutex{}
 
+type AckFn func() error
+type HandlerFn func(data string, ack AckFn)
+
+type queueSubscription struct {
+	queueName  string
+	noOfWorker uint16
+	handler    HandlerFn
+	channel    *amqp.Channel
+}
+
 //RabbitMQVNDelay rabbitmq publish with delay supported
 type RabbitMQVNDelay struct {
-	connection    *amqp.Connection
-	channel       *amqp.Channel
-	mapQueue      map[string]bool
-	delayMapQueue map[string]bool
-	isClose       bool
+	connection     *amqp.Connection
+	publishChannel *amqp.Channel
+	mapQueue       map[string]bool
+	delayMapQueue  map[string]bool
+	queueSubs      []queueSubscription
 }
 
 //NewRabbitMQVNDelay create new instance for RabbitMQVNDelay, used to call functional for Publish and PublishWithDelay
-func NewRabbitMQVNDelay(connection *amqp.Connection) (*RabbitMQVNDelay, error) {
-	channel, err := connection.Channel()
+func NewRabbitMQVNDelay(url string) (*RabbitMQVNDelay, error) {
+	r := &RabbitMQVNDelay{
+		nil,
+		nil,
+		map[string]bool{},
+		map[string]bool{},
+		make([]queueSubscription, 0),
+	}
 
+	err := r.dial(url)
 	if err != nil {
+		log.Println("failed connect to rabbitMQ server. Error: ", err)
 		return nil, err
 	}
 
-	r := &RabbitMQVNDelay{
-		connection,
-		channel,
-		map[string]bool{},
-		map[string]bool{},
-		false,
-	}
-
-	r.closeChannelHandler()
+	r.initPublishChannel()
 
 	err = r.declareExchange(activeExchange)
 	if err != nil {
+		r.publishChannel.Close()
+		r.connection.Close()
 		return nil, err
 	}
 
 	err = r.declareExchange(delayExchange)
 	if err != nil {
+		r.publishChannel.Close()
+		r.connection.Close()
 		return nil, err
 	}
 
 	return r, nil
 }
 
-func (r *RabbitMQVNDelay) closeChannelHandler() {
-	go func() {
-		for {
-			if r.isClose {
-				log.Println(logTag, "channel was closed by request")
-				break
-			}
-
-			reason, ok := <-r.channel.NotifyClose(make(chan *amqp.Error))
-
-			if !ok {
-				log.Println(logTag, "channel was normally closed")
-				return
-			}
-
-			log.Println(logTag, "channel was accidentally closed with a reason:", reason)
-
-			for {
-				if r.isClose {
-					log.Println(logTag, "channel was closed by request")
-					break
-				}
-
-				if r.connection == nil {
-					//delay for re-create
-					time.Sleep(sleepDelay)
-					continue
-				}
-
-				channel, err := r.connection.Channel()
-
-				if err == nil {
-					r.channel = channel
-					log.Println(logTag, "success to re-create channel")
-					break
-				}
-
-				//delay for re-create
-				time.Sleep(sleepDelay)
-			}
-		}
-	}()
-}
-
 //Publish used to send message to queue without delay
 func (r *RabbitMQVNDelay) Publish(queueName string, message string) error {
-	if r.isClose {
-		return errors.New("Publish was stopped")
-	}
-
 	var (
 		err        error
 		routingKey = queueName
@@ -135,10 +100,6 @@ func (r *RabbitMQVNDelay) Publish(queueName string, message string) error {
 
 //PublishWithDelay used to send message to queue with given specific delay, will accept time.Duration parameters
 func (r *RabbitMQVNDelay) PublishWithDelay(queueName string, message string, delay time.Duration) error {
-	if r.isClose {
-		return errors.New("Publish was stopped")
-	}
-
 	var (
 		err        error
 		routingKey = queueName + "." + suffixDelayQueue
@@ -159,12 +120,154 @@ func (r *RabbitMQVNDelay) PublishWithDelay(queueName string, message string, del
 	return nil
 }
 
-func (r *RabbitMQVNDelay) Close() {
-	if r.channel != nil {
-		r.channel.Close()
+//Subscribe rabbitmq subscriber
+func (r *RabbitMQVNDelay) Subscribe(queueName string, noOfWorker uint16, handler HandlerFn) {
+	queueSub := queueSubscription{
+		queueName,
+		noOfWorker,
+		handler,
+		nil,
 	}
 
-	r.isClose = true
+	r.queueSubs = append(r.queueSubs, queueSub)
+}
+
+func (r *RabbitMQVNDelay) Start() error {
+	queueDeclareChannel, err := r.connection.Channel()
+	defer queueDeclareChannel.Close()
+
+	if err != nil {
+		log.Println(logTag, "failed to initialize subscribe channel. Error:", err)
+		return err
+	}
+
+	for idx, queueSub := range r.queueSubs {
+		_, err = queueDeclareChannel.QueueDeclare(
+			queueSub.queueName,
+			true,
+			false,
+			false,
+			false,
+			nil,
+		)
+
+		if err != nil {
+			log.Printf("%s failed declare queue for %s. Error: %v\n", logTag, queueSub.queueName, err)
+
+			//close all channel created before (rollback)
+			for i := 0; i < idx; i++ {
+				r.queueSubs[i].channel.Close()
+			}
+
+			return err
+		}
+
+		r.listen(idx)
+	}
+
+	return nil
+}
+
+func (r *RabbitMQVNDelay) listen(index int) error {
+	var err error
+	queueName := r.queueSubs[index].queueName
+
+	for {
+		if r.connection == nil {
+			//delay for re-create
+			time.Sleep(sleepDelay)
+			continue
+		}
+
+		r.queueSubs[index].channel, err = r.connection.Channel()
+
+		if err == nil {
+			break
+		}
+
+		log.Printf("%s failed to init channel for %s. Error: %v\n", logTag, queueName, err)
+
+		//delay for re-create
+		time.Sleep(sleepDelay)
+	}
+
+	go func() {
+		reason, ok := <-r.queueSubs[index].channel.NotifyClose(make(chan *amqp.Error))
+
+		if !ok {
+			log.Println(logTag, "channel was normally closed")
+			return
+		}
+
+		log.Printf("%s channel was closed for %s. Reason: %v\n", logTag, queueName, reason)
+
+		//delay for re-create
+		time.Sleep(sleepDelay)
+
+		r.listen(index)
+	}()
+
+	r.subscribe(index)
+
+	return nil
+}
+
+func (r *RabbitMQVNDelay) subscribe(index int) {
+	var messages <-chan amqp.Delivery
+	var noOfWorker int = int(r.queueSubs[index].noOfWorker)
+
+	queueName := r.queueSubs[index].queueName
+
+	for {
+		err := r.queueSubs[index].channel.Qos(noOfWorker, 0, false)
+
+		if err != nil {
+			log.Printf("%s failed to set channel QOS for %s. Error: %v\n", logTag, queueName, err)
+
+			//delay for re-create
+			time.Sleep(sleepDelay)
+			continue
+		}
+
+		messages, err = r.queueSubs[index].channel.Consume(
+			queueName,
+			"",
+			false,
+			false,
+			false,
+			true,
+			nil,
+		)
+
+		if err != nil {
+			log.Println("failed declare rabbitMQ consumer", err)
+
+			//delay for re-create
+			time.Sleep(sleepDelay)
+			continue
+		}
+
+		//break if everything is successfull
+		break
+	}
+
+	for i := 0; i < noOfWorker; i++ {
+		go func() {
+			for {
+				for data := range messages {
+					// message := string(data.Body)
+					// log.Printf("%s [%s] process message: %s\n", logTag, queueName, message)
+
+					ackFn := func() error {
+						// log.Printf("%s [%s] ack message: %s\n", logTag, queueName, message)
+						return data.Ack(false)
+					}
+
+					r.queueSubs[index].handler(string(data.Body), ackFn)
+				}
+			}
+		}()
+	}
 }
 
 func (r *RabbitMQVNDelay) initQueue(queueName string) error {
@@ -225,7 +328,7 @@ func (r *RabbitMQVNDelay) initDelayQueue(queueName string) error {
 }
 
 func (r *RabbitMQVNDelay) publishActiveMessage(message string, routingKey string, exchangeName string) error {
-	err := r.channel.Publish(
+	err := r.publishChannel.Publish(
 		exchangeName,
 		routingKey,
 		false,
@@ -249,7 +352,7 @@ func (r *RabbitMQVNDelay) publishDelayMessage(message string, routingKey string,
 
 	delayTime := strconv.FormatInt(delay.Milliseconds(), 10)
 
-	err := r.channel.Publish(
+	err := r.publishChannel.Publish(
 		exchangeName,
 		routingKey,
 		false,
@@ -270,7 +373,7 @@ func (r *RabbitMQVNDelay) publishDelayMessage(message string, routingKey string,
 func (r *RabbitMQVNDelay) declareExchange(exchangeName string) error {
 	var err error
 
-	if err = r.channel.ExchangeDeclare(
+	if err = r.publishChannel.ExchangeDeclare(
 		exchangeName,
 		"direct",
 		true,
@@ -288,7 +391,7 @@ func (r *RabbitMQVNDelay) declareExchange(exchangeName string) error {
 func (r *RabbitMQVNDelay) declareActiveQueue(queueName string) error {
 	var err error
 
-	_, err = r.channel.QueueDeclare(
+	_, err = r.publishChannel.QueueDeclare(
 		queueName,
 		true,
 		false,
@@ -313,7 +416,7 @@ func (r *RabbitMQVNDelay) declareDelayedQueue(queueName string, routingKey strin
 		"x-dead-letter-routing-key": routingKey,
 	}
 
-	_, err = r.channel.QueueDeclare(
+	_, err = r.publishChannel.QueueDeclare(
 		queueName,
 		true,
 		false,
@@ -331,7 +434,7 @@ func (r *RabbitMQVNDelay) declareDelayedQueue(queueName string, routingKey strin
 func (r *RabbitMQVNDelay) bindQueueWithExchange(queueName string, routingKey string, exchangeName string) error {
 	var err error
 
-	if err = r.channel.QueueBind(
+	if err = r.publishChannel.QueueBind(
 		queueName,
 		routingKey,
 		exchangeName,
@@ -340,6 +443,84 @@ func (r *RabbitMQVNDelay) bindQueueWithExchange(queueName string, routingKey str
 	); err != nil {
 		return err
 	}
+
+	return nil
+}
+
+func (r *RabbitMQVNDelay) initPublishChannel() {
+	for {
+		if r.connection == nil {
+			//delay for re-create
+			time.Sleep(sleepDelay)
+			continue
+		}
+
+		channel, err := r.connection.Channel()
+
+		if err == nil {
+			r.publishChannel = channel
+			break
+		}
+
+		log.Println(logTag, "failed to init publish channel. Error:", err)
+
+		//delay for re-create
+		time.Sleep(sleepDelay)
+	}
+
+	go func() {
+		reason, ok := <-r.publishChannel.NotifyClose(make(chan *amqp.Error))
+
+		if !ok {
+			log.Println(logTag, "publish channel was normally closed")
+			return
+		}
+
+		log.Println(logTag, "publish channel was closed. Reason:", reason)
+
+		//delay for re-create
+		time.Sleep(sleepDelay)
+
+		r.initPublishChannel()
+	}()
+}
+
+func (r *RabbitMQVNDelay) dial(url string) error {
+	connection, err := amqp.Dial(url)
+
+	if err != nil {
+		return err
+	}
+
+	r.connection = connection
+
+	go func() {
+
+		for {
+			reason, ok := <-r.connection.NotifyClose(make(chan *amqp.Error))
+
+			if !ok {
+				log.Println(logTag, "connection was normally closed")
+				time.Sleep(sleepDelay)
+				break
+			}
+
+			log.Println(logTag, "connections was closed. Reason: ", reason)
+
+			//always trying to reconnect
+			for {
+				r.connection, err = amqp.Dial(url)
+				if err == nil {
+					log.Println(logTag, "successfull to reconnect")
+					break
+				}
+
+				log.Println(logTag, "failed to reconnect (will retry). Error: ", err)
+				//delay before connect
+				time.Sleep(sleepDelay)
+			}
+		}
+	}()
 
 	return nil
 }
