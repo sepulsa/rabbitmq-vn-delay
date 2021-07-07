@@ -65,8 +65,6 @@ func NewRabbitMQVNDelay(connection *amqp.Connection) (*RabbitMQVNDelay, error) {
 
 func (r *RabbitMQVNDelay) closeChannelHandler() {
 	go func() {
-		var err error
-
 		for {
 			if r.isClose {
 				log.Println(logTag, "channel was closed by request")
