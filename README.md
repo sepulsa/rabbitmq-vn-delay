@@ -13,7 +13,7 @@ This library also handling auto reconnect for connection and channel (wrap insid
 
 ### Installation
 
-    go get github.com/sepulsa/rabbitmq-vn-delay
+    go get github.com/sepulsa/rabbitmq-vn-delay@v1.2.0
 
 ## Example
 
