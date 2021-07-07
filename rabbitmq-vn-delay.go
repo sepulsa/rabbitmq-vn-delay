@@ -161,7 +161,7 @@ func (r *RabbitMQVNDelay) PublishWithDelay(queueName string, message string, del
 
 func (r *RabbitMQVNDelay) Close() {
 	if r.channel != nil {
-		r.Close()
+		r.channel.Close()
 	}
 
 	r.isClose = true
