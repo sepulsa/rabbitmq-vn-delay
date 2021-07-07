@@ -1,6 +1,7 @@
 # rabbitmq-vn-delay
 
-Lightweight library to send and subscribe queue, with delayed feature using rabbitMQ native plugins. We also handling automatically reconnect for connection and channel.
+Lightweight library to send and subscribe queue, with delayed feature using rabbitMQ native plugins.
+This library also handling auto reconnect for connection and channel (wrap inside)
 
 ## Feature Overview
 
