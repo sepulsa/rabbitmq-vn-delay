@@ -1,6 +1,7 @@
 package rabbitmqvndelay
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -109,6 +110,10 @@ func (r *RabbitMQVNDelay) closeChannelHandler() {
 
 //Publish used to send message to queue without delay
 func (r *RabbitMQVNDelay) Publish(queueName string, message string) error {
+	if r.isClose {
+		return errors.New("Publish was stopped")
+	}
+
 	var (
 		err        error
 		routingKey = queueName
@@ -131,6 +136,10 @@ func (r *RabbitMQVNDelay) Publish(queueName string, message string) error {
 
 //PublishWithDelay used to send message to queue with given specific delay, will accept time.Duration parameters
 func (r *RabbitMQVNDelay) PublishWithDelay(queueName string, message string, delay time.Duration) error {
+	if r.isClose {
+		return errors.New("Publish was stopped")
+	}
+
 	var (
 		err        error
 		routingKey = queueName + "." + suffixDelayQueue
