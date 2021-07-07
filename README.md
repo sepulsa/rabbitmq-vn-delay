@@ -19,90 +19,96 @@ This library also handling auto reconnect for connection and channel (wrap insid
 
 #### Publish Directly Without Delay
 
-    package main
+```go
+package main
 
-    import (
-    	r "github.com/sepulsa/rabbitmq-vn-delay"
-    	"github.com/streadway/amqp"
-    )
+import (
+	r "github.com/sepulsa/rabbitmq-vn-delay"
+	"github.com/streadway/amqp"
+)
 
-    func main() {
-    	url := "amqp://guest:guest@localhost:5672/"
+func main() {
+	url := "amqp://guest:guest@localhost:5672/"
 
-    	rabbitMQ, err := r.NewRabbitMQVNDelay(url)
-    	if err != nil {
-    		panic(err)
-    	}
+	rabbitMQ, err := r.NewRabbitMQVNDelay(url)
+	if err != nil {
+		panic(err)
+	}
 
-    	err = rabbitMQ.Publish("demo", "this is just demo")
-    	if err != nil {
-    		panic(err)
-    	}
-    }
+	err = rabbitMQ.Publish("demo", "this is just demo")
+	if err != nil {
+		panic(err)
+	}
+}
+```
 
 #### Publish With Delay Feature
 
-    package main
+```go
+package main
 
-    import (
-    	"time"
+import (
+	"time"
 
-    	r "github.com/sepulsa/rabbitmq-vn-delay"
-    	"github.com/streadway/amqp"
-    )
+	r "github.com/sepulsa/rabbitmq-vn-delay"
+	"github.com/streadway/amqp"
+)
 
-    func main() {
-    	url := "amqp://guest:guest@localhost:5672/"
+func main() {
+	url := "amqp://guest:guest@localhost:5672/"
 
-    	rabbitMQ, err := r.NewRabbitMQVNDelay(url)
-    	if err != nil {
-    		panic(err)
-    	}
+	rabbitMQ, err := r.NewRabbitMQVNDelay(url)
+	if err != nil {
+		panic(err)
+	}
 
-    	err = rabbitMQ.PublishWithDelay("demo", "this is just demo", time.Second*5)
-    	if err != nil {
-    		panic(err)
-    	}
-    }
+	err = rabbitMQ.PublishWithDelay("demo", "this is just demo", time.Second*5)
+	if err != nil {
+		panic(err)
+	}
+}
+```
 
 #### Subcribe Queue
 
-    package main
+```go
+package main
 
-    import (
-        "sync"
-    	"time"
-        "log"
+import (
+	"sync"
+	"time"
+	"log"
 
-    	r "github.com/sepulsa/rabbitmq-vn-delay"
-    	"github.com/streadway/amqp"
-    )
+	r "github.com/sepulsa/rabbitmq-vn-delay"
+	"github.com/streadway/amqp"
+)
 
-    func main() {
-        var waitgroup sync.WaitGroup
-    	url := "amqp://guest:guest@localhost:5672/"
+func main() {
+	var waitgroup sync.WaitGroup
+	url := "amqp://guest:guest@localhost:5672/"
 
-    	rabbitMQ, err := r.NewRabbitMQVNDelay(url)
-    	if err != nil {
-    		panic(err)
-    	}
-        
-        handler := func(data string, ack r.AckFn) {
-		    log.Printf("Data: %s\n", data)
+	rabbitMQ, err := r.NewRabbitMQVNDelay(url)
+	if err != nil {
+		panic(err)
+	}
 
-            //mark task as complete
-    		ack()
-            
-            waitgroup.Done()
-	    }
+	handler := func(data string, ack r.AckFn) {
+		log.Printf("Data: %s\n", data)
 
-        //register the subscriber
-        rabbitMQ.Subscribe("demo", 1, handler)
+		//mark task as complete
+		ack()
 
-        waitgroup.Add(count)
-        
-        //start worker
-    	rabbitMQ.Start()
-        
-	    waitgroup.Wait()
-    }
+		waitgroup.Done()
+	}
+
+	//register the subscriber
+	rabbitMQ.Subscribe("demo", 1, handler)
+
+	waitgroup.Add(count)
+
+	//start worker
+	rabbitMQ.Start()
+
+	waitgroup.Wait()
+}
+```
