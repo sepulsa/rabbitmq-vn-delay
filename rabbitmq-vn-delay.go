@@ -2,6 +2,7 @@ package rabbitmqvndelay
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"sync"
 	"time"
@@ -9,34 +10,44 @@ import (
 	"github.com/streadway/amqp"
 )
 
-const activeExchange = "active.vn.exchange"
-const delayExchange = "delay.vn.exchange"
+const (
+	activeExchange   = "active.vn.exchange"
+	delayExchange    = "delay.vn.exchange"
+	suffixDelayQueue = "delay.vn.queue"
 
-const suffixDelayQueue = "delay.vn.queue"
+	sleepDelay = time.Second * 2
+	logTag     = "[vndelay]"
+)
 
 var lock = &sync.Mutex{}
 var delayLock = &sync.Mutex{}
 
 //RabbitMQVNDelay rabbitmq publish with delay supported
 type RabbitMQVNDelay struct {
+	connection    *amqp.Connection
 	channel       *amqp.Channel
 	mapQueue      map[string]bool
 	delayMapQueue map[string]bool
+	isClose       bool
 }
 
 //NewRabbitMQVNDelay create new instance for RabbitMQVNDelay, used to call functional for Publish and PublishWithDelay
 func NewRabbitMQVNDelay(connection *amqp.Connection) (*RabbitMQVNDelay, error) {
-
 	channel, err := connection.Channel()
+
 	if err != nil {
 		return nil, err
 	}
 
 	r := &RabbitMQVNDelay{
+		connection,
 		channel,
 		map[string]bool{},
 		map[string]bool{},
+		false,
 	}
+
+	r.closeChannelHandler()
 
 	err = r.declareExchange(activeExchange)
 	if err != nil {
@@ -49,6 +60,51 @@ func NewRabbitMQVNDelay(connection *amqp.Connection) (*RabbitMQVNDelay, error) {
 	}
 
 	return r, nil
+}
+
+func (r *RabbitMQVNDelay) closeChannelHandler() {
+	go func() {
+		var err error
+
+		for {
+			if r.isClose {
+				log.Println(logTag, "channel was closed by request")
+				break
+			}
+
+			reason, ok := <-r.channel.NotifyClose(make(chan *amqp.Error))
+
+			if !ok {
+				log.Println(logTag, "channel was normally closed")
+				return
+			}
+
+			log.Println(logTag, "channel was accidentally closed with a reason:", reason)
+
+			for {
+				if r.isClose {
+					log.Println(logTag, "channel was closed by request")
+					break
+				}
+
+				if r.connection == nil {
+					//delay for re-create
+					time.Sleep(sleepDelay)
+					continue
+				}
+
+				r.channel, err = r.connection.Channel()
+
+				if err == nil {
+					log.Println(logTag, "success to re-create channel")
+					break
+				}
+
+				//delay for re-create
+				time.Sleep(sleepDelay)
+			}
+		}
+	}()
 }
 
 //Publish used to send message to queue without delay
@@ -93,6 +149,14 @@ func (r *RabbitMQVNDelay) PublishWithDelay(queueName string, message string, del
 	}
 
 	return nil
+}
+
+func (r *RabbitMQVNDelay) Close() {
+	if r.channel != nil {
+		r.Close()
+	}
+
+	r.isClose = true
 }
 
 func (r *RabbitMQVNDelay) initQueue(queueName string) error {
@@ -159,8 +223,9 @@ func (r *RabbitMQVNDelay) publishActiveMessage(message string, routingKey string
 		false,
 		false,
 		amqp.Publishing{
-			ContentType: "text/plain",
-			Body:        []byte(message),
+			ContentType:  "text/plain",
+			Body:         []byte(message),
+			DeliveryMode: amqp.Persistent,
 		})
 	if err != nil {
 		return err
@@ -181,9 +246,10 @@ func (r *RabbitMQVNDelay) publishDelayMessage(message string, routingKey string,
 		false,
 		false,
 		amqp.Publishing{
-			Expiration:  delayTime,
-			ContentType: "text/plain",
-			Body:        []byte(message),
+			Expiration:   delayTime,
+			ContentType:  "text/plain",
+			Body:         []byte(message),
+			DeliveryMode: amqp.Persistent,
 		})
 	if err != nil {
 		return err
