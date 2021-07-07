@@ -1,11 +1,12 @@
 # rabbitmq-vn-delay
 
-Lightweight library to send queue, with delayed feature using rabbitMQ native plugins.
+Lightweight library to send and subscribe queue, with delayed feature using rabbitMQ native plugins. We also handling automatically reconnect for connection and channel.
 
 ## Feature Overview
 
 -   Send queue with delay
 -   Send queue directly, without delay
+-   Subscribe multiple queue with specified total of worker for each
 
 ## Getting Started
 
@@ -26,17 +27,13 @@ Lightweight library to send queue, with delayed feature using rabbitMQ native pl
 
     func main() {
     	url := "amqp://guest:guest@localhost:5672/"
-    	conn, err := amqp.Dial(url)
+
+    	rabbitMQ, err := r.NewRabbitMQVNDelay(url)
     	if err != nil {
     		panic(err)
     	}
 
-    	publisher, err := r.NewRabbitMQVNDelay(conn)
-    	if err != nil {
-    		panic(err)
-    	}
-
-    	err = publisher.Publish("demo", "this is just demo")
+    	err = rabbitMQ.Publish("demo", "this is just demo")
     	if err != nil {
     		panic(err)
     	}
@@ -55,18 +52,56 @@ Lightweight library to send queue, with delayed feature using rabbitMQ native pl
 
     func main() {
     	url := "amqp://guest:guest@localhost:5672/"
-    	conn, err := amqp.Dial(url)
+
+    	rabbitMQ, err := r.NewRabbitMQVNDelay(url)
     	if err != nil {
     		panic(err)
     	}
 
-    	publisher, err := r.NewRabbitMQVNDelay(conn)
+    	err = rabbitMQ.PublishWithDelay("demo", "this is just demo", time.Second*5)
     	if err != nil {
     		panic(err)
     	}
+    }
 
-    	err = publisher.PublishWithDelay("demo", "this is just demo", time.Second*5)
+#### Subcribe Queue
+
+    package main
+
+    import (
+        "sync"
+    	"time"
+        "log"
+
+    	r "github.com/sepulsa/rabbitmq-vn-delay"
+    	"github.com/streadway/amqp"
+    )
+
+    func main() {
+        var waitgroup sync.WaitGroup
+    	url := "amqp://guest:guest@localhost:5672/"
+
+    	rabbitMQ, err := r.NewRabbitMQVNDelay(url)
     	if err != nil {
     		panic(err)
     	}
+        
+        handler := func(data string, ack r.AckFn) {
+		    log.Printf("Data: %s\n", data)
+
+            //mark task as complete
+    		ack()
+            
+            waitgroup.Done()
+	    }
+
+        //register the subscriber
+        rabbitMQ.Subscribe("demo", 1, handler)
+
+        waitgroup.Add(count)
+        
+        //start worker
+    	rabbitMQ.Start()
+        
+	    waitgroup.Wait()
     }
