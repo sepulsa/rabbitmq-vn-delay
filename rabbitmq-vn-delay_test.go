@@ -14,7 +14,7 @@ import (
 
 const (
 	queueName             = "vn.unit-test"
-	acceptableDelay int64 = 50
+	acceptableDelay int64 = 150
 )
 
 var rabbitMQ *vndelay.RabbitMQVNDelay
@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 func TestPublish(t *testing.T) {
 	var waitgroup sync.WaitGroup
 
-	handler := func(data string, ack vndelay.AckFn) {
+	handler := func(data string, ack vndelay.DoneFn) {
 		receivedTime := time.Now().Unix()
 		messageInNumber, err := strconv.ParseInt(data, 10, 64)
 		if err != nil {
@@ -47,7 +47,7 @@ func TestPublish(t *testing.T) {
 			t.Error("Message received not on proper delay. Expect at: ", messageInNumber, " but received at: ", receivedTime)
 		}
 
-		ack()
+		ack(true)
 		waitgroup.Done()
 	}
 
@@ -90,7 +90,7 @@ func TestSubscribe(t *testing.T) {
 		log.Println("Start publish queue")
 
 		for i := 1; i <= count; i++ {
-			data := fmt.Sprintf("iseng %02d", i)
+			data := fmt.Sprintf("%02d", i)
 
 			log.Println("publish data:", data)
 			err := rabbitMQ.Publish(queueName, data)
@@ -103,10 +103,10 @@ func TestSubscribe(t *testing.T) {
 		}
 	}()
 
-	handler := func(data string, ack vndelay.AckFn) {
+	handler := func(data string, done vndelay.DoneFn) {
 		log.Printf("execute task with data %s\n", data)
 		time.Sleep(time.Millisecond * 100)
-		ack()
+		done(true)
 		waitgroup.Done()
 	}
 

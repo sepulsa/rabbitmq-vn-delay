@@ -22,8 +22,8 @@ const (
 var lock = &sync.Mutex{}
 var delayLock = &sync.Mutex{}
 
-type AckFn func() error
-type HandlerFn func(data string, ack AckFn)
+type DoneFn func(ack bool) error
+type HandlerFn func(data string, done DoneFn)
 
 type queueSubscription struct {
 	queueName  string
@@ -258,12 +258,16 @@ func (r *RabbitMQVNDelay) subscribe(index int) {
 					// message := string(data.Body)
 					// log.Printf("%s [%s] process message: %s\n", logTag, queueName, message)
 
-					ackFn := func() error {
+					doneFn := func(ack bool) error {
 						// log.Printf("%s [%s] ack message: %s\n", logTag, queueName, message)
-						return data.Ack(false)
+						if ack {
+							return data.Ack(false)
+						} else {
+							return data.Nack(false, true)
+						}
 					}
 
-					r.queueSubs[index].handler(string(data.Body), ackFn)
+					r.queueSubs[index].handler(string(data.Body), doneFn)
 				}
 			}
 		}()
